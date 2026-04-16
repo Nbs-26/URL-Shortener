@@ -1,5 +1,5 @@
 const { createPostgresClient } = require("./postgres");
-
+const {createRedisClient} = require('./redisClient');
 async function shorten(req,res) {
     const {url} = req.body;
     if(!url){
@@ -49,26 +49,59 @@ async function redirect(req,res) {
     if(!short_code){
         return res.status(400).json({"Error" : "Short-Code not exist"});
     }
+    try {
+        var longURL = await findLongURL(short_code);
+        if(!longURL){
+            return res.status(404).json({"Error" : "Invalid short-code provided"});
+        }
+        return res.redirect(longURL);
+    } catch (error) {
+        return res.status(500).json({"Error" : error.message});
+    }
+}
+
+async function findLongURL(short_code) {
+    if(!short_code){
+        return null;
+    }
     let pgClient;
+    let redisClient;
     try {
         //Check in Cache
-    
+        //Create a Redis-Client
+        redisClient = await createRedisClient();
+        const cachedLongURL = await redisClient.get(short_code);
+        // console.log(cachedValue)
+        if(cachedLongURL){
+            console.log("Cache Hit")
+            return cachedLongURL;
+        }
+        console.log("Cache Miss")
+        
         //Create a Postgres Client
         pgClient = await createPostgresClient();
         //Select query from DB
         let selectQuery = 'select long_url from url_shortener.urls where short_code = $1';
         let result = await pgClient.query(selectQuery, [short_code]);
         if(result.rows.length == 0){
-            return res.status(404).json({"Error" : "Invalid short-code"});
+            return null;
         }
         var long_url = result.rows[0].long_url;
+
         //Insert in the Cache, so that it can be retrieved later.
-        return res.status(302).redirect(long_url);
+        await redisClient.set(short_code,long_url,{
+            EX : 3600 //Set the expiry time to 1 hr
+        });
+        return long_url;
     } catch (error) {
-        return res.status(500).json({"Error" : error.message});
+        console.error(error);
+        throw error;
     } finally {
         if (pgClient) {
             await pgClient.end();
+        }
+        if(redisClient){
+            await redisClient.quit();
         }
     }
 }
